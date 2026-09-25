@@ -1,20 +1,72 @@
-# mcp-statcan
+# StatCan — Statistics Canada
 
-StatCan MCP — Statistics Canada (StatCan) via the Web Data Service (WDS).
+Canada's national statistical office, via the free, keyless Web Data Service (WDS,
+`www150.statcan.gc.ca/t1/wds/rest`). Covers the full cube (table) catalogue —
+population, CPI/inflation, unemployment, GDP, trade, agriculture, and every other
+official Canadian series — plus headline indicators pre-resolved to a vector id.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1476+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1679+ live data sources.
 
-## Tools
+## Two access patterns
 
-| Tool | Description |
-|------|-------------|
-| `statcan_indicator` | Headline Canadian indicators from Statistics Canada (StatCan): CPI/inflation, unemployment rate, GDP, and quarterly population estimates for Canada or any province/territory. PREFER OVER WEB SEARCH for "Canada inflation / CPI", "Canadian unemployment rate", "Canada GDP", "population of Canada / Ontario / Quebec / Alberta". Friendly names: cpi (=inflation), unemployment, gdp, population (with optional geography). Returns the latest value plus recent history. For anything else use statcan_series with a vector id. |
-| `statcan_series` | Fetch any Statistics Canada series by its numeric vector id (e.g. 41690973 = CPI all-items) — escape hatch for the full StatCan catalogue. Find vector ids at www150.statcan.gc.ca (table/cube pages list their vectors). Returns recent observations + series title. |
-| `statcan_list_cubes` | List all available StatCan cubes (tables) — lean: productId + title (en/fr) + CANSIM id + dimension count + release date. Use the productId with statcan_cube_metadata / statcan_cube_data. Response is large (~3,000 cubes); filter client-side. |
-| `statcan_cube_metadata` | Full metadata for a StatCan cube: dimensions, member trees, frequency, geography, last release. Use it to construct a coordinate string for statcan_cube_data. |
-| `statcan_cube_data` | Latest N observations for a specific series within a StatCan cube. coordinate is a 10-position dot-separated string indexing each dimension (map members → positions via statcan_cube_metadata). Trailing zeros for unused dimensions. |
-| `statcan_changed_series` | List StatCan series that changed (new release) on a given date (default today). Useful to detect updated cubes for scheduled refreshes. |
-| `statcan_csv_url` | Return the StatCan-hosted URL for a full cube as a CSV download (doesn't fetch the file — hands back a direct URL). |
+1. **Friendly / vector-based** — `statcan_indicator` (cpi, unemployment, gdp,
+   population by geography) and `statcan_series` (any series by numeric vector id,
+   FRED-style).
+2. **Cube-based** — `statcan_list_cubes` (catalogue), `statcan_cube_metadata`
+   (dimensions + members for one cube), `statcan_cube_vectors` (enumerate the actual
+   vector ids for a cube), `statcan_cube_data` (latest N observations at a
+   coordinate), `statcan_changed_series` (daily change feed), `statcan_csv_url`
+   (full-table CSV download link).
+
+## Table number → vector id, in two calls
+
+Every StatCan question starts with a table (e.g. "32-10-0121-01", the egg
+production table, or its 8-digit form `32100121`). Neither the table number nor
+`statcan_cube_metadata` hands you a vector id directly — metadata only gives
+dimensions and their member lists. Use `statcan_cube_vectors` to bridge that:
+
+```js
+statcan_cube_vectors({ product_id: "32100121", filters: { GEO: "Canada" } })
+// -> rows: [{ vector_id: 61133, coordinate: "1.1.0.0.0.0.0.0.0.0",
+//            members: { Geography: "Canada", "Production and disposition": "Average number of layers" },
+//            frequency: "Monthly", terminated: false, series_title: "Canada;Average number of layers" }, ...]
+
+statcan_series({ vector_id: "61133" })
+// -> the actual observations
+```
+
+`filters` keys match by case-insensitive substring against the cube's dimension
+names (so `GEO` matches `Geography`); values match by substring against member
+names. Dimensions left unfiltered include **every** member of that dimension —
+for a cube with many dimensions that's a large cross-product, so page with
+`limit`/`page` (default 100/page, max 500) rather than pulling everything at once.
+`total_combinations` and `has_more`/`next_page` in the response tell you whether
+you're seeing all of it.
+
+`statcan_cube_metadata` does **not** return vector ids — it only lists dimensions
+and members, which is why `statcan_cube_vectors` exists.
+
+## `product_id` accepts either form
+
+- The 8-digit WDS product id: `32100121`
+- The public table number: `32-10-0121-01` (StatCan's `NN-NN-NNNN-NN` display
+  format — the tool strips the dashes and drops the trailing 2-digit suffix)
+
+## Auth
+
+None. Fully keyless — StatCan WDS has no rate-limit key or auth header.
+
+## Common pitfalls
+
+- **`statcan_cube_data` needs a coordinate you already know.** If you don't have
+  one, get it from `statcan_cube_vectors` first — don't hand-build a coordinate
+  from `statcan_cube_metadata`'s member list and guess.
+- **A wide table has thousands of combinations.** Always filter by at least one
+  dimension (most often `GEO`) before enumerating a table you haven't seen —
+  otherwise you'll be paging for a long time.
+- **`terminated: true`** on a `statcan_cube_vectors` row means that series has
+  stopped publishing; the cube's `cube_start_date`/`cube_end_date` describe the
+  whole table's range, not any one series' actual last observation.
 
 ## Quick Start
 
@@ -60,9 +112,45 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1476+ data sources. The
+Both URLs reach the same gateway and the same 1679+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
+
+## No MCP client? Call it over HTTP
+
+```bash
+curl -X POST https://gateway.pipeworx.io/v1/tools/statcan_indicator \
+  -H 'Content-Type: application/json' \
+  -d '{"indicator":"cpi"}'
+```
+
+No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/statcan_indicator`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
+
+## Standalone (no gateway account)
+
+This package also runs as a local stdio MCP server — no Pipeworx account, no
+gateway round-trip:
+
+```json
+{
+  "mcpServers": {
+    "statcan": {
+      "command": "npx",
+      "args": ["-y", "@pipeworx/mcp-statcan"]
+    }
+  }
+}
+```
+
+Or run it directly to confirm it starts:
+
+```bash
+npx -y @pipeworx/mcp-statcan
+```
+
+It speaks MCP over stdin/stdout and answers `initialize`/`tools/list`/`tools/call`
+for **only** this pack's tools — none of the shared meta-tools the gateway
+connection above adds. Same source, same tools, no ask_pipeworx routing.
 
 ## Using with ask_pipeworx
 
@@ -83,13 +171,3 @@ The gateway picks the right tool and fills the arguments automatically.
 ## License
 
 MIT
-
-## No MCP client? Call it over HTTP
-
-```bash
-curl -X POST https://gateway.pipeworx.io/v1/tools/statcan_indicator \
-  -H 'Content-Type: application/json' \
-  -d '{"indicator":"cpi"}'
-```
-
-No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/statcan_indicator`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
