@@ -1428,7 +1428,10 @@ interface StatcanTableRow {
   members: Record<string, string | null>;
 }
 
-interface PipelineStateRow { dataset_name: string; last_success_at: string | null; last_row_count: number | null; schedule: string }
+interface PipelineStateRow {
+  dataset_name: string; last_success_at: string | null; last_row_count: number | null; schedule: string;
+  last_error?: string | null; consecutive_failures?: number | null;
+}
 
 async function getStatcanTable(cfg: SupabaseConfig, args: Record<string, unknown>) {
   const productId = reqNum(args, 'product_id', '42100037');
@@ -1462,14 +1465,50 @@ async function getStatcanTable(cfg: SupabaseConfig, args: Record<string, unknown
     );
     if (anyRows.length === 0) {
       const { rows: cachedRows } = await pgList<PipelineStateRow>(
-        cfg, 'pipeline_state', 'dataset_name=like.statcan-*&select=dataset_name,last_success_at,last_row_count,schedule&order=dataset_name.asc', false,
+        cfg, 'pipeline_state', 'dataset_name=like.statcan-*&select=dataset_name,last_success_at,last_row_count,schedule,last_error,consecutive_failures&order=dataset_name.asc', false,
       ).catch(() => ({ rows: [] as PipelineStateRow[], total: null }));
       const cachedIds = cachedRows.map((r) => r.dataset_name.replace(/^statcan-/, '')).filter(Boolean);
-      throw new Error(
-        `user_error: StatCan product ${productId} is not one of the whole-table StatCan datasets statcan_table currently covers — statcan_table has nothing to return for it (this is a refusal, not an empty result). ` +
-          (cachedIds.length ? `Currently cached: ${cachedIds.join(', ')}. ` : 'No StatCan tables are cached on this deployment yet. ') +
-          'For any other StatCan table use statcan_cube_data (per-coordinate, live) or statcan_csv_url (raw CSV download URL, live).',
-      );
+      // A pipeline_state row exists for every CONFIGURED dataset the runner
+      // has ever attempted, success or failure — it is not proof any rows
+      // landed. Checking membership in cachedIds (rather than just "did the
+      // row-count query return anything") is what stops a product_id that
+      // IS in the curated set, but whose first load hasn't succeeded yet,
+      // from being told it "is not one of the datasets statcan_table
+      // currently covers" — a real contradiction once the very same message
+      // then lists it under "Currently cached" (caught live 2026-09-30,
+      // fleet #2507 follow-up).
+      const myState = cachedRows.find((r) => r.dataset_name === `statcan-${productId}`);
+      if (!myState) {
+        throw new Error(
+          `user_error: StatCan product ${productId} is not one of the whole-table StatCan datasets statcan_table currently covers — statcan_table has nothing to return for it (this is a refusal, not an empty result). ` +
+            (cachedIds.length ? `Currently covered: ${cachedIds.join(', ')}. ` : 'No StatCan tables are covered on this deployment yet. ') +
+            'For any other StatCan table use statcan_cube_data (per-coordinate, live) or statcan_csv_url (raw CSV download URL, live).',
+        );
+      }
+      // Covered, but no rows have landed for it yet — say so plainly (a
+      // labelled empty, not a bare [] and not a false "not covered"
+      // refusal) with the pipeline's own status rather than guessing.
+      // Never-completed datasets retry on every pipeline tick, so this is
+      // normally transient. Describe WHAT is missing, not WHERE data would
+      // come from — no hosting/mirroring disclosure (feedback_never_disclose_hosting).
+      return {
+        product_id: productId,
+        source: 'Statistics Canada', country: 'Canada',
+        statement:
+          `Statistics Canada (StatCan) product (cube) ${productId} is one of the tables statcan_table covers, but no data has loaded for it yet` +
+          (myState.last_error ? ` — last load attempt failed: ${myState.last_error}` : ' (first load pending)') +
+          '. Retry shortly, or use statcan_cube_data (per-coordinate, live) or statcan_csv_url (raw CSV download URL, live) meanwhile.',
+        data_as_of: null,
+        pipeline_status: {
+          loaded: false,
+          last_success_at: myState.last_success_at ?? null,
+          last_error: myState.last_error ?? null,
+          consecutive_failures: myState.consecutive_failures ?? 0,
+          schedule: myState.schedule,
+        },
+        filters_applied,
+        page, limit, returned: 0, total_matching: 0, has_more: false, next_page: null, rows: [],
+      };
     }
     return {
       product_id: productId,
