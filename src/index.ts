@@ -827,6 +827,24 @@ const tools: McpToolExport['tools'] = [
     },
   },
   {
+    name: 'statcan_table',
+    description:
+      'Whole StatCan table (or a filtered slice) in ONE call, from a local Pipeworx copy of the table — full history, every coordinate, member labels included, instead of one coordinate per call. Use this instead of statcan_cube_data when the question spans more than one coordinate ("compare all provinces", "the whole eggs/milk/hydro table", "full history for this table"), or instead of statcan_csv_url when you need the DATA rather than a download URL. Covers a curated set of high-demand StatCan product ids only — call with just product_id to check coverage; an uncached product_id REFUSES with a clear message naming what is cached, it does not return an empty result. Data refreshes weekly from StatCan\'s official getFullTableDownloadCSV export; every response carries data_as_of. Statistics Canada Open Licence permits redistribution.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        product_id: { type: 'number', description: 'StatCan cube product ID, e.g. 42100037.' },
+        coordinate: { type: 'string', description: 'Optional: restrict to one coordinate (as in statcan_cube_data), e.g. "1.1.1.1". Omit for the whole table.' },
+        geo: { type: 'string', description: 'Optional: case-insensitive substring filter on the GEO column, e.g. "Quebec" or "Ontario".' },
+        ref_date_from: { type: 'string', description: 'Optional: only rows with ref_date >= this value (matches the table\'s own date grain, e.g. "2022" or "2022-01").' },
+        ref_date_to: { type: 'string', description: 'Optional: only rows with ref_date <= this value.' },
+        limit: { type: 'number', description: 'Max rows per page (default 500, max 1000).' },
+        page: { type: 'number', description: 'Page number, 1-based (default 1).' },
+      },
+      required: ['product_id'],
+    },
+  },
+  {
     name: 'statcan_csv_url',
     description:
       "Return the StatCan-hosted URL for a full cube as a CSV download (doesn't fetch the file — hands back a direct URL).",
@@ -1360,6 +1378,139 @@ async function getCodeSets(codeset: string | undefined, language: string | undef
   };
 }
 
+// ── statcan_table — local whole-table copy (fleet #2507) ──────────────
+// Reads workers/data-pipeline's Supabase output (statcan_table_rows), NOT
+// the live WDS API. injectSupabase (pack-manifest.json) hands this pack
+// `_supabaseUrl`/`_supabaseKey` (service_role) on every call — same pattern
+// as the zillow pack.
+
+interface SupabaseConfig { url: string; key: string }
+
+const SUPABASE_TIMEOUT_MS = 20_000;
+
+async function supabaseFetch(cfg: SupabaseConfig, path: string, extraHeaders?: Record<string, string>): Promise<Response> {
+  const headers: Record<string, string> = {
+    apikey: cfg.key,
+    Authorization: `Bearer ${cfg.key}`,
+    Accept: 'application/json',
+    ...extraHeaders,
+  };
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(`${cfg.url}/rest/v1/${path}`, { headers, signal: AbortSignal.timeout(SUPABASE_TIMEOUT_MS) });
+      if (res.ok || res.status < 500) return res;
+      lastErr = await httpError(res, 'StatCan data store');
+    } catch (err) {
+      lastErr = err;
+    }
+    await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+async function pgList<T>(cfg: SupabaseConfig, table: string, query: string, countExact: boolean): Promise<{ rows: T[]; total: number | null }> {
+  const res = await supabaseFetch(cfg, `${table}?${query}`, countExact ? { Prefer: 'count=exact' } : undefined);
+  if (!res.ok) throw await httpError(res, `StatCan data store (${table})`);
+  const rows = (await res.json()) as T[];
+  let total: number | null = null;
+  if (countExact) {
+    const n = Number((res.headers.get('content-range') ?? '').split('/')[1]);
+    total = Number.isFinite(n) ? n : null;
+  }
+  return { rows, total };
+}
+
+interface StatcanTableRow {
+  coordinate: string; ref_date: string; geo: string | null; dguid: string | null;
+  vector_id: number | null; value: number | null; status: string | null; symbol: string | null;
+  terminated: boolean | null; uom: string | null; scalar_factor: string | null;
+  members: Record<string, string | null>;
+}
+
+interface PipelineStateRow { dataset_name: string; last_success_at: string | null; last_row_count: number | null; schedule: string }
+
+async function getStatcanTable(cfg: SupabaseConfig, args: Record<string, unknown>) {
+  const productId = reqNum(args, 'product_id', '42100037');
+  const coordinate = (args.coordinate as string | undefined)?.trim();
+  const geo = (args.geo as string | undefined)?.trim();
+  const refFrom = (args.ref_date_from as string | undefined)?.trim();
+  const refTo = (args.ref_date_to as string | undefined)?.trim();
+  const limit = Math.min(1000, Math.max(1, Math.floor((args.limit as number) ?? 500)));
+  const page = Math.max(1, Math.floor((args.page as number) ?? 1));
+  const offset = (page - 1) * limit;
+
+  const parts = [`product_id=eq.${productId}`];
+  if (coordinate) parts.push(`coordinate=eq.${encodeURIComponent(coordinate)}`);
+  if (geo) parts.push(`geo=ilike.*${encodeURIComponent(geo)}*`);
+  if (refFrom) parts.push(`ref_date=gte.${encodeURIComponent(refFrom)}`);
+  if (refTo) parts.push(`ref_date=lte.${encodeURIComponent(refTo)}`);
+  parts.push('order=ref_date.asc,coordinate.asc', `limit=${limit}`, `offset=${offset}`);
+  parts.push('select=coordinate,ref_date,geo,dguid,vector_id,value,status,symbol,terminated,uom,scalar_factor,members');
+
+  const { rows, total } = await pgList<StatcanTableRow>(cfg, 'statcan_table_rows', parts.join('&'), true);
+
+  const filters_applied = { coordinate: coordinate ?? null, geo: geo ?? null, ref_date_from: refFrom ?? null, ref_date_to: refTo ?? null };
+
+  if ((total ?? 0) === 0) {
+    // Distinguish "this product_id isn't cached at all" (refuse loudly, per
+    // the acceptance bar) from "your filters matched nothing in a table we
+    // DO have" (a real, non-empty answer about the data — fleet #608
+    // silent-zero policy: say so rather than handing back a bare []).
+    const { rows: anyRows } = await pgList<{ product_id: number }>(
+      cfg, 'statcan_table_rows', `product_id=eq.${productId}&select=product_id&limit=1`, false,
+    );
+    if (anyRows.length === 0) {
+      const { rows: cachedRows } = await pgList<PipelineStateRow>(
+        cfg, 'pipeline_state', 'dataset_name=like.statcan-*&select=dataset_name,last_success_at,last_row_count,schedule&order=dataset_name.asc', false,
+      ).catch(() => ({ rows: [] as PipelineStateRow[], total: null }));
+      const cachedIds = cachedRows.map((r) => r.dataset_name.replace(/^statcan-/, '')).filter(Boolean);
+      throw new Error(
+        `user_error: StatCan product ${productId} is not one of the whole-table StatCan datasets statcan_table currently covers — statcan_table has nothing to return for it (this is a refusal, not an empty result). ` +
+          (cachedIds.length ? `Currently cached: ${cachedIds.join(', ')}. ` : 'No StatCan tables are cached on this deployment yet. ') +
+          'For any other StatCan table use statcan_cube_data (per-coordinate, live) or statcan_csv_url (raw CSV download URL, live).',
+      );
+    }
+    return {
+      product_id: productId,
+      source: 'Statistics Canada', country: 'Canada',
+      statement: `Statistics Canada (StatCan) product (cube) ${productId}: 0 rows matched the coordinate/geo/ref_date filters (the table itself has data — widen or drop a filter).`,
+      filters_applied,
+      page, limit, returned: 0, total_matching: 0, has_more: false, next_page: null, rows: [],
+    };
+  }
+
+  const [meta, freshness] = await Promise.all([
+    getCubeMetadata(productId).catch(() => null),
+    pgList<PipelineStateRow>(cfg, 'pipeline_state', `dataset_name=eq.statcan-${productId}&select=dataset_name,last_success_at,last_row_count,schedule&limit=1`, false)
+      .then((r) => r.rows[0] ?? null)
+      .catch(() => null),
+  ]);
+
+  const statement =
+    `Statistics Canada (StatCan) product (cube) ${productId}${meta?.title_en ? ` — ${meta.title_en}` : ''}: ` +
+    `${rows.length} of ${total} row(s) on page ${page} (limit ${limit}) from Pipeworx's local whole-table copy` +
+    (freshness?.last_success_at ? `, refreshed ${freshness.last_success_at}` : '') +
+    '. Statistics Canada Open Licence — Source: Statistics Canada.';
+
+  return {
+    product_id: productId,
+    cube_title_en: meta?.title_en ?? null,
+    source: 'Statistics Canada', country: 'Canada', statement,
+    filters_applied,
+    page, limit,
+    returned: rows.length,
+    total_matching: total,
+    has_more: offset + rows.length < (total ?? 0),
+    next_page: offset + rows.length < (total ?? 0) ? page + 1 : null,
+    data_as_of: freshness?.last_success_at ?? null,
+    refresh_schedule: freshness?.schedule ?? 'weekly',
+    cached_row_count: freshness?.last_row_count ?? null,
+    licence: 'Statistics Canada Open Licence — reproduction/redistribution permitted with source acknowledgment (statcan.gc.ca/en/reference/licence).',
+    rows,
+  };
+}
+
 // ── Router ───────────────────────────────────────────────────────────
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
@@ -1383,6 +1534,14 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
       return getLatestData(reqNum(args, 'product_id', '36100434'), reqStr(args, 'coordinate', '"1.1.1.0.0.0.0.0.0.0"'), (args.n_periods as number) ?? 12);
     case 'statcan_changed_series':
       return getChangedSeries(args.date as string | undefined);
+    case 'statcan_table': {
+      const supabaseUrl = (args._supabaseUrl as string | undefined)?.trim();
+      const supabaseKey = (args._supabaseKey as string | undefined)?.trim();
+      if (!supabaseUrl || !supabaseKey) {
+        throw new Error('statcan_table is not configured on this deployment — an operator must enable its data credentials. This is a setup problem, not your arguments.');
+      }
+      return getStatcanTable({ url: supabaseUrl, key: supabaseKey }, args);
+    }
     case 'statcan_csv_url':
       return getCsvUrl(reqNum(args, 'product_id', '36100434'), (args.language as string) ?? 'en');
     case 'statcan_codeset':

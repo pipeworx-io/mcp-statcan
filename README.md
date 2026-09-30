@@ -5,7 +5,7 @@ Canada's national statistical office, via the free, keyless Web Data Service (WD
 population, CPI/inflation, unemployment, GDP, trade, agriculture, and every other
 official Canadian series — plus headline indicators pre-resolved to a vector id.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1683+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1684+ live data sources.
 
 ## Two access patterns
 
@@ -15,8 +15,57 @@ Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents 
 2. **Cube-based** — `statcan_list_cubes` (catalogue), `statcan_cube_metadata`
    (dimensions + members for one cube), `statcan_cube_vectors` (enumerate the actual
    vector ids for a cube), `statcan_cube_data` (latest N observations at a
-   coordinate), `statcan_changed_series` (daily change feed), `statcan_csv_url`
-   (full-table CSV download link).
+   coordinate), `statcan_table` (whole table / filtered slice —
+   see below), `statcan_changed_series` (daily change feed), `statcan_csv_url`
+   (full-table CSV download link, live upstream URL, never fetches).
+
+## `statcan_table` — whole-table lookup (fleet #2507)
+
+`statcan_cube_data` answers ONE coordinate per call and `statcan_csv_url` only
+hands back a download URL — neither can answer "the whole table" or "every
+province at once" in one call, which is what most repeat callers actually want
+(60d: statcan rep3 146, #2 repeat-demand cluster in the catalog; no_match
+evidence: 42100037 child-care-difficulty coords fetched one at a time, 34100035
+hydro-electric Quebec, 32100113 milk sold off farms, 98100353 2021 Census
+religion by province).
+
+`statcan_table` answers from a curated set of high-demand
+StatCan tables (`statcan_table_rows`, refreshed weekly by
+`workers/data-pipeline/src/datasets/statcan.ts` from StatCan's own
+`getFullTableDownloadCSV` export), not the live WDS API:
+
+```js
+statcan_table({ product_id: 42100037 })
+// -> every coordinate, every ref_date, member labels (e.g. { "Statistics":
+//    "Percentage of children", "Type of difficulty encountered...": "..." }),
+//    in one call. Paged (limit/page) past 1000 rows.
+
+statcan_table({ product_id: 32100113, geo: "Quebec", ref_date_from: "2023-01" })
+```
+
+**Coverage is curated, not universal.** Calling `statcan_table` on a product_id
+that isn't cached REFUSES with a clear error naming the currently-cached ids —
+it never silently returns an empty result. For anything outside that set, use
+`statcan_cube_data` (per-coordinate, live) or `statcan_csv_url` (raw CSV,
+live) instead. The wave-1 list (16 tables — see `statcan.ts` for the full
+rationale) covers the tables with verified repeat demand; adding a new table to
+the ingest list needs no migration (see next paragraph).
+
+**Schema is generic on purpose.** StatCan's per-table CSV carries a fixed set
+of metadata columns (REF_DATE, GEO, DGUID, VECTOR, COORDINATE, VALUE, STATUS,
+SYMBOL, TERMINATED, DECIMALS, UOM, UOM_ID, SCALAR_FACTOR, SCALAR_ID) plus
+however many table-specific dimension-label columns the table declares (e.g.
+"Statistics", "Type of difficulty encountered..." for 42100037) — those vary
+per table, so they're captured into a `members` jsonb column rather than a
+per-table relational schema.
+
+Every response carries `data_as_of` (from the ingestion pipeline's
+`pipeline_state.last_success_at` for that table) and a `licence` field.
+**Licence: Statistics Canada Open Licence** (statcan.gc.ca/en/reference/licence)
+— explicitly permits reproduction, redistribution and sale of the Information,
+conditioned on source acknowledgment ("Source: Statistics Canada, name of
+product, reference date...") and not implying StatCan endorsement. No personal
+data is stored — every row is an aggregate statistic.
 
 ## Table number → vector id, in two calls
 
@@ -112,7 +161,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1683+ data sources. The
+Both URLs reach the same gateway and the same 1684+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 
