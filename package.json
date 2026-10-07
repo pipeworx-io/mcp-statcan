@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-statcan",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "StatCan MCP — Statistics Canada (StatCan) via the Web Data Service (WDS).",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-60dc4c626529a0dfe8f8688dc255c4ec65ebd4accbecd701398ad1e2f911c4b5",
-    "sourceCommit": "658bedc4e66c6eab7e17c569f81012a2ee312624"
+    "sourceHash": "v1-91339149d841fe8dd9a9d2e952a79f2c8faf53ccc6ccc28b7b5339e7e8cd4eee",
+    "sourceCommit": "be47827ad0f444e813e7224db0489c4ea890a30e"
   }
 }

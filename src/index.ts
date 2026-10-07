@@ -1293,6 +1293,12 @@ async function getLatestData(productId: number, coordinate: string, nPeriods: nu
   // the latest N periods. The one thing this call cannot give them is the
   // FULL history (n_periods is capped, this endpoint has no "give me
   // everything" mode); statcan_csv_url does, off the same product_id.
+  //
+  // 14d re-measure (fleet #2325, 2026-10-07, same methodology as above):
+  // single-tool-only callers 51 -> 21 (total callers 224 -> 221, essentially
+  // flat), share 22.8% -> 9.5%, DOWN 13.3pt — the largest drop of the 6
+  // shipped hints. Window blends pre/post-hint traffic; directional, not a
+  // verdict. Full comparison in the fleet #2325 close.
   const resolvedProductId = o.productId ?? productId;
   return {
     product_id: resolvedProductId, coordinate: o.coordinate ?? coordinate,

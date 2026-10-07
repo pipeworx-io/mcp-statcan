@@ -3,7 +3,7 @@
   "name": "io.github.pipeworx-io/statcan",
   "title": "Statcan",
   "description": "StatCan MCP — Statistics Canada (StatCan) via the Web Data Service (WDS).",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "websiteUrl": "https://pipeworx.io/packs/statcan",
   "repository": {
     "url": "https://github.com/pipeworx-io/mcp-statcan",
