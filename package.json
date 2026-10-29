@@ -1,12 +1,20 @@
 {
   "name": "@pipeworx/mcp-statcan",
-  "version": "0.2.4",
-  "description": "StatCan MCP — Statistics Canada (StatCan) via the Web Data Service (WDS).",
+  "version": "0.3.0",
+  "description": "StatCan MCP — Statistics Canada (StatCan) via the Web Data Service (WDS). Free, no auth. Fills the Canada national-statistics gap.",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./tools.json": "./tools.json",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "mcp-statcan": "bin/cli.js"
+  },
+  "files": ["bin/", "lib/", "tools.json", "server.json"],
+  "engines": {
+    "node": ">=18"
   },
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "pipeworx", "statcan"],
   "license": "MIT",
@@ -14,19 +22,12 @@
     "type": "git",
     "url": "git+https://github.com/pipeworx-io/mcp-statcan.git"
   },
-  "scripts": {
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "tsx": "^4.19.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.9.3",
-    "@cloudflare/workers-types": "^4.20260405.1"
-  },
+  "mcpName": "io.github.pipeworx-io/statcan",
   "pipeworx": {
-    "sourceHash": "v1-91339149d841fe8dd9a9d2e952a79f2c8faf53ccc6ccc28b7b5339e7e8cd4eee",
-    "sourceCommit": "be47827ad0f444e813e7224db0489c4ea890a30e"
+    "mode": "gateway",
+    "slug": "statcan",
+    "gatewaySlug": "statcan",
+    "sourceHash": "v1-18ed48d6b72bbb268b27edbc318d3301ef53efb2281ea358ef17f53560a78ddb",
+    "sourceCommit": "f47d581679e1e887373df51ba623f891fbe4c464"
   }
 }
