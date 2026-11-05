@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-statcan",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "StatCan MCP — Statistics Canada (StatCan) via the Web Data Service (WDS). Free, no auth. Fills the Canada national-statistics gap.",
   "type": "module",
   "main": "lib/index.js",
@@ -27,7 +27,7 @@
     "mode": "gateway",
     "slug": "statcan",
     "gatewaySlug": "statcan",
-    "sourceHash": "v1-18ed48d6b72bbb268b27edbc318d3301ef53efb2281ea358ef17f53560a78ddb",
-    "sourceCommit": "f47d581679e1e887373df51ba623f891fbe4c464"
+    "sourceHash": "v1-b4994218ead471e74361ca8e7ebbe1718ddadc1ef421536cb30e3afc2532f9b4",
+    "sourceCommit": "868e119d526d5409447b7ee2149afba7eb9d2593"
   }
 }
